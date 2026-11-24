@@ -61,6 +61,8 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicBoolean
+import androidx.compose.foundation.layout.offset
 
 data class SetInfo(val id: String, val name: String, val official: Int?)
 data class CardRow(val setId: String, val setName: String, val number: Int?, val name: String)
@@ -97,8 +99,55 @@ class Store(private val prefs: SharedPreferences) {
     var lastCard by mutableStateOf<CardRow?>(null)
     var currentSetId by mutableStateOf<String?>(null)
 
+    // 直近5件の登録履歴
+    val history = mutableStateListOf<CardRow>()
+
     init {
-        prefs.all.forEach { (k, v) -> if (v is Int && v > 0) counts[k] = v }
+        prefs.all.forEach { (k, v) ->
+            if (v is Int && v > 0) counts[k] = v
+        }
+        loadHistory()
+    }
+
+    private fun loadHistory() {
+        history.clear()
+        val json = prefs.getString("registration_history", null) ?: return
+
+        try {
+            val array = JSONArray(json)
+            for (i in 0 until array.length()) {
+                val obj = array.getJSONObject(i)
+                history.add(
+                    CardRow(
+                        setId = obj.getString("setId"),
+                        setName = obj.getString("setName"),
+                        number = if (obj.isNull("number")) null
+                        else obj.getInt("number"),
+                        name = obj.getString("name")
+                    )
+                )
+            }
+        } catch (e: Exception) {
+            history.clear()
+        }
+    }
+
+    private fun saveHistory() {
+        val array = JSONArray()
+
+        history.take(5).forEach { card ->
+            array.put(
+                JSONObject()
+                    .put("setId", card.setId)
+                    .put("setName", card.setName)
+                    .put("number", card.number ?: JSONObject.NULL)
+                    .put("name", card.name)
+            )
+        }
+
+        prefs.edit()
+            .putString("registration_history", array.toString())
+            .apply()
     }
 
     fun set(key: String, n: Int) {
@@ -111,28 +160,82 @@ class Store(private val prefs: SharedPreferences) {
         }
     }
 
-    fun add(key: String, d: Int) = set(key, (counts[key] ?: 0) + d)
+    fun add(key: String, d: Int) {
+        set(key, (counts[key] ?: 0) + d)
+    }
 
     fun register(card: CardRow): Int {
         val k = keyOf(card)
         add(k, 1)
         lastCard = card
+
+        history.add(0, card)
+        while (history.size > 5) {
+            history.removeAt(history.lastIndex)
+        }
+        saveHistory()
+
         return counts[k] ?: 0
     }
 
+    // 直近の登録を1枚取り消す
     fun undo(): CardRow? {
-        val c = lastCard ?: return null
-        val k = keyOf(c)
-        if ((counts[k] ?: 0) > 0) add(k, -1)
-        lastCard = null
-        return c
+        val card = history.firstOrNull() ?: lastCard ?: return null
+        return undoHistory(0)
     }
+
+    // 指定した履歴の登録を1枚取り消す
+    fun undoHistory(index: Int): CardRow? {
+        if (index !in history.indices) return null
+
+        val card = history[index]
+        val key = keyOf(card)
+
+        if ((counts[key] ?: 0) <= 0) return null
+
+        add(key, -1)
+        history.removeAt(index)
+
+        lastCard = history.firstOrNull()
+        saveHistory()
+
+        return card
+    }
+
+    // 指定した履歴のカードを別のカードに差し替える
+    fun replaceHistory(index: Int, newCard: CardRow): Int {
+        if (index !in history.indices) return 0
+
+        val oldCard = history[index]
+        val oldKey = keyOf(oldCard)
+        val newKey = keyOf(newCard)
+
+        if ((counts[oldKey] ?: 0) <= 0) return 0
+
+        if (oldKey != newKey) {
+            add(oldKey, -1)
+            add(newKey, 1)
+        }
+
+        history[index] = newCard
+        lastCard = history.firstOrNull()
+        saveHistory()
+
+        return counts[newKey] ?: 0
+    }
+
+    // 従来の直前登録修正機能（互換性維持）
     fun replaceLast(card: CardRow): Int {
+        if (history.isNotEmpty()) {
+            return replaceHistory(0, card)
+        }
+
         val old = lastCard
         if (old != null) {
-            val ok = keyOf(old)
-            if ((counts[ok] ?: 0) > 0) add(ok, -1)
+            val oldKey = keyOf(old)
+            if ((counts[oldKey] ?: 0) > 0) add(oldKey, -1)
         }
+
         return register(card)
     }
 }
@@ -406,6 +509,22 @@ fun ScanScreen(
     val candidates = remember { mutableStateListOf<CardRow>() }
     val providerRef = remember { arrayOfNulls<ProcessCameraProvider>(1) }
     var fixing by remember { mutableStateOf(false) }
+    var historyActionIndex by remember { mutableStateOf<Int?>(null) }
+    var historyReplaceIndex by remember { mutableStateOf<Int?>(null) }
+    val cameraBusy = remember { AtomicBoolean(false) }
+    LaunchedEffect(fixing, historyActionIndex, historyReplaceIndex) {
+        val busy = fixing || historyActionIndex != null ||
+                historyReplaceIndex != null
+
+        cameraBusy.set(busy)
+
+        if (!busy) {
+            tracker.lastSeen = System.currentTimeMillis()
+            tracker.candKey = null
+            tracker.candCount = 0
+            tracker.lockedKey = null
+        }
+    }
     var status by remember {
         mutableStateOf(
             if (data == null) "データの読み込みに失敗しました: $loadError"
@@ -423,6 +542,78 @@ fun ScanScreen(
         candidates.clear()
         vibrate(context)
     }
+    // 履歴をタップしたときの操作メニュー
+    historyActionIndex?.let { index ->
+        val card = store.history.getOrNull(index)
+
+        if (card != null) {
+            AlertDialog(
+                onDismissRequest = {
+                    historyActionIndex = null
+                },
+                title = { Text("登録履歴の操作") },
+                text = {
+                    Column {
+                        Text(card.name)
+                        Text(
+                            "${card.setName}  #${card.number ?: "-"}",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        historyReplaceIndex = index
+                        historyActionIndex = null
+                    }) {
+                        Text("修正")
+                    }
+                },
+                dismissButton = {
+                    Row {
+                        TextButton(onClick = {
+                            val removed = store.undoHistory(index)
+                            status = if (removed != null) {
+                                "1枚取り消しました\n${removed.name}"
+                            } else {
+                                "取り消せませんでした"
+                            }
+                            historyActionIndex = null
+                        }) {
+                            Text("1枚取消")
+                        }
+                        TextButton(onClick = {
+                            historyActionIndex = null
+                        }) {
+                            Text("閉じる")
+                        }
+                    }
+                }
+            )
+        } else {
+            historyActionIndex = null
+        }
+    }
+
+    // 履歴から選んだカードの修正
+    historyReplaceIndex?.let { index ->
+        ReplaceDialog(
+            data = data,
+            onPick = { newCard ->
+                val n = store.replaceHistory(index, newCard)
+                status = if (n > 0) {
+                    "修正しました\n${newCard.name}\n${newCard.setId} #${newCard.number} ×$n"
+                } else {
+                    "修正できませんでした"
+                }
+                historyReplaceIndex = null
+                candidates.clear()
+            },
+            onCancel = {
+                historyReplaceIndex = null
+            }
+        )
+    }
     if (fixing) {
         ReplaceDialog(
             data = data,
@@ -439,9 +630,14 @@ fun ScanScreen(
     Column(Modifier.fillMaxSize()) {
         if (granted) {
             AndroidView(
-                modifier = Modifier.weight(1f).fillMaxWidth(),
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .heightIn(min = 180.dp)
+                    .padding(bottom = 8.dp),
                 factory = { ctx ->
                     val previewView = PreviewView(ctx)
+                    previewView.implementationMode = PreviewView.ImplementationMode.COMPATIBLE
                     val providerFuture = ProcessCameraProvider.getInstance(ctx)
                     providerFuture.addListener({
                         val provider = providerFuture.get()
@@ -455,6 +651,14 @@ fun ScanScreen(
                             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                             .build()
                         analysis.setAnalyzer(Executors.newSingleThreadExecutor()) { proxy ->
+                            if (cameraBusy.get()) {
+                                tracker.lastSeen = System.currentTimeMillis()
+                                tracker.candKey = null
+                                tracker.candCount = 0
+                                proxy.close()
+                                return@setAnalyzer
+                            }
+
                             val now = System.currentTimeMillis()
                             if (now - lastTime.get() < 30) {
                                 proxy.close()
@@ -473,6 +677,14 @@ fun ScanScreen(
                             recognizer.process(img)
                                 .addOnSuccessListener { text ->
                                     ocrMs = System.currentTimeMillis() - t0
+
+                                    // OCR処理中に操作画面が開いた場合も登録しない
+                                    if (cameraBusy.get()) {
+                                        tracker.lastSeen = System.currentTimeMillis()
+                                        tracker.candKey = null
+                                        tracker.candCount = 0
+                                        return@addOnSuccessListener
+                                    }
                                     if (data == null) return@addOnSuccessListener
                                     val now2 = System.currentTimeMillis()
                                     if (now2 - tracker.lastSeen > 700) {
@@ -545,9 +757,11 @@ fun ScanScreen(
         }
 
         Text(
-            "登録先リスト: $listName",
+            "登録先リスト: $listName ",
             style = MaterialTheme.typography.titleSmall,
-            modifier = Modifier.padding(start = 8.dp, top = 8.dp, end = 8.dp)
+            modifier = Modifier
+                .padding(start = 8.dp, top = 14.dp, end = 8.dp)
+                .offset(y = 0.dp)
         )
         Text(
             "合計 ${store.counts.values.sum()}枚   セット: ${store.currentSetId ?: "未指定"}   OCR ${ocrMs}ms",
@@ -556,16 +770,32 @@ fun ScanScreen(
         Text(
             status,
             style = MaterialTheme.typography.titleMedium,
-            minLines = 4,
-            modifier = Modifier.fillMaxWidth().padding(8.dp)
+            minLines = 3,
+            maxLines = 3,
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 60.dp)
+                .padding(horizontal = 8.dp)
         )
+
+
         Column(
             Modifier
                 .fillMaxWidth()
-                .heightIn(max = 160.dp)
+                .heightIn(max = 110.dp)
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 8.dp)
         ) {
+            // 読み取り候補を先に表示
+            Text(
+                "読み取り候補",
+                style = MaterialTheme.typography.titleSmall
+            )
+
+            if (candidates.isEmpty()) {
+                Text("読み取り候補はありません")
+            }
+
             candidates.forEach { c ->
                 Button(
                     onClick = {
@@ -573,7 +803,28 @@ fun ScanScreen(
                         doRegister(c)
                     },
                     modifier = Modifier.fillMaxWidth()
-                ) { Text("${c.setId} ${c.setName} #${c.number} ${c.name}") }
+                ) {
+                    Text("${c.setId} ${c.setName} #${c.number} ${c.name}")
+                }
+            }
+
+            // 直近の登録履歴を下に表示
+            Text(
+                "直近の登録履歴",
+                style = MaterialTheme.typography.titleSmall
+            )
+
+            if (store.history.isEmpty()) {
+                Text("まだ登録履歴はありません")
+            }
+
+            store.history.forEachIndexed { index, card ->
+                OutlinedButton(
+                    onClick = { historyActionIndex = index },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("${card.name}  ${card.setId} #${card.number ?: "-"}")
+                }
             }
         }
         Row(Modifier.fillMaxWidth().padding(8.dp)) {
@@ -905,7 +1156,7 @@ fun ReplaceDialog(data: CardData?, onPick: (CardRow) -> Unit, onCancel: () -> Un
         title = { Text("登録の修正") },
         text = {
             Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
-                Text("直前に登録したカードを、選んだカードに差し替えます")
+                Text("対象のカードを、選んだカードに差し替えます")
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(
                     value = nameQ,
