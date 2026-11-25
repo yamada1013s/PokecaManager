@@ -761,7 +761,7 @@ fun ScanScreen(
             style = MaterialTheme.typography.titleSmall,
             modifier = Modifier
                 .padding(start = 8.dp, top = 14.dp, end = 8.dp)
-                .offset(y = 0.dp)
+                .offset(y = 2.dp)
         )
         Text(
             "合計 ${store.counts.values.sum()}枚   セット: ${store.currentSetId ?: "未指定"}   OCR ${ocrMs}ms",
