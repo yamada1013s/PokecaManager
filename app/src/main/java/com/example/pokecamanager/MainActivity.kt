@@ -276,6 +276,25 @@ class Store(
 
         saveInstances()
     }
+    // 全カード個体から指定タグを削除する
+    fun removeTagFromAllInstances(tag: String) {
+        var changed = false
+
+        for (i in instances.indices) {
+            val instance = instances[i]
+
+            if (tag in instance.tags) {
+                instances[i] = instance.copy(
+                    tags = instance.tags.filterNot { it == tag }
+                )
+                changed = true
+            }
+        }
+
+        if (changed) {
+            saveInstances()
+        }
+    }
 
     // 一覧画面から新しい個体を追加する
     fun addCardInstance(card: CardRow) {
@@ -690,6 +709,54 @@ fun TabButton(label: String, selected: Boolean, modifier: Modifier, onClick: () 
 @Composable
 fun AppRoot(owner: LifecycleOwner) {
     val context = LocalContext.current
+    // アプリ共通設定
+    val settingsPrefs = remember {
+        context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
+    }
+
+// 読み取り間隔（初期値：30ミリ秒）
+    var scanIntervalMs by remember {
+        mutableStateOf(settingsPrefs.getInt("scan_interval_ms", 30))
+    }
+
+// タグ一覧（並び順を保持して保存）
+    val initialTagOptions = remember {
+        val savedJson = settingsPrefs.getString("tag_names_json", null)
+
+        if (savedJson != null) {
+            runCatching {
+                val array = JSONArray(savedJson)
+                List(array.length()) { index ->
+                    array.getString(index)
+                }
+            }.getOrDefault(DEFAULT_TAGS)
+        } else {
+            // 以前の保存形式から移行
+            settingsPrefs.getStringSet("tag_names", null)?.toList()
+                ?: DEFAULT_TAGS
+        }
+    }
+
+    var tagOptions by remember {
+        mutableStateOf(initialTagOptions)
+    }
+    // 読み取り間隔を変更・保存
+    fun updateScanInterval(value: Int) {
+        scanIntervalMs = value
+        settingsPrefs.edit()
+            .putInt("scan_interval_ms", value)
+            .apply()
+    }
+
+    // タグ一覧を変更・保存（並び順も保持）
+    fun updateTagOptions(value: List<String>) {
+        tagOptions = value
+
+        settingsPrefs.edit()
+            .putString("tag_names_json", JSONArray(value).toString())
+            .remove("tag_names")
+            .apply()
+    }
     val dataResult = remember { runCatching { loadCardData(context) } }
     val data = dataResult.getOrNull()
     val lib = remember {
@@ -707,15 +774,74 @@ fun AppRoot(owner: LifecycleOwner) {
             nameMap
         )
     }
+
+    // タグの表示順を変更
+    fun moveTag(from: Int, to: Int) {
+        if (from !in tagOptions.indices || to !in tagOptions.indices) {
+            return
+        }
+
+        val reordered = tagOptions.toMutableList()
+        val movedTag = reordered.removeAt(from)
+        reordered.add(to, movedTag)
+
+        updateTagOptions(reordered)
+    }
+
+    // 全コレクションからタグを削除
+    fun deleteTagFromAllCollections(tag: String) {
+        lib.items.toList().forEach { collection ->
+
+            if (collection.id == lib.activeId) {
+                // 現在開いているコレクション
+                store.removeTagFromAllInstances(tag)
+            } else {
+                // それ以外のコレクション
+                val otherStore = Store(
+                    context.getSharedPreferences(
+                        prefsName(collection.id),
+                        Context.MODE_PRIVATE
+                    ),
+                    nameMap
+                )
+
+                otherStore.removeTagFromAllInstances(tag)
+            }
+        }
+
+        // 設定に登録されているタグ一覧からも削除
+        updateTagOptions(tagOptions.filterNot { it == tag })
+    }
     var tab by remember { mutableStateOf(0) }
 
     Column(Modifier.fillMaxSize()) {
         Box(Modifier.weight(1f).fillMaxWidth()) {
             when (tab) {
-                0 -> ScanScreen(owner, data, store, activeInfo.name, dataResult.exceptionOrNull()?.message)
-                1 -> ListScreen(store, nameMap, activeInfo)
+                0 -> ScanScreen(
+                    owner,
+                    data,
+                    store,
+                    activeInfo.name,
+                    dataResult.exceptionOrNull()?.message,
+                    scanIntervalMs
+                )
+                1 -> ListScreen(store, nameMap, activeInfo, tagOptions)
                 2 -> ManualScreen(data, store, activeInfo.name)
-                else -> ListsScreen(lib, store)
+                3 -> ListsScreen(lib, store)
+                4 -> SettingsScreen(
+                    scanIntervalMs = scanIntervalMs,
+                    onScanIntervalSave = { updateScanInterval(it) },
+                    tagOptions = tagOptions,
+                    onAddTag = { tag ->
+                        updateTagOptions(tagOptions + tag)
+                    },
+                    onDeleteTag = { tag ->
+                        deleteTagFromAllCollections(tag)
+                    },
+                    onMoveTag = { from, to ->
+                        moveTag(from, to)
+                    }
+                )
             }
         }
         Row(Modifier.fillMaxWidth().padding(8.dp)) {
@@ -726,6 +852,8 @@ fun AppRoot(owner: LifecycleOwner) {
             TabButton("手入力", tab == 2, Modifier.weight(1f)) { tab = 2 }
             Spacer(Modifier.width(4.dp))
             TabButton("リスト", tab == 3, Modifier.weight(1f)) { tab = 3 }
+            Spacer(Modifier.width(4.dp))
+            TabButton("設定", tab == 4, Modifier.weight(1f)) { tab = 4 }
         }
     }
 }
@@ -733,7 +861,12 @@ fun AppRoot(owner: LifecycleOwner) {
 @Composable
 @androidx.annotation.OptIn(ExperimentalGetImage::class)
 fun ScanScreen(
-    owner: LifecycleOwner, data: CardData?, store: Store, listName: String, loadError: String?
+    owner: LifecycleOwner,
+    data: CardData?,
+    store: Store,
+    listName: String,
+    loadError: String?,
+    scanIntervalMs: Int
 ) {
     val context = LocalContext.current
     var granted by remember {
@@ -907,7 +1040,7 @@ fun ScanScreen(
                             }
 
                             val now = System.currentTimeMillis()
-                            if (now - lastTime.get() < 30) {
+                            if (now - lastTime.get() < scanIntervalMs) {
                                 proxy.close()
                                 return@setAnalyzer
                             }
@@ -1092,7 +1225,12 @@ fun ScanScreen(
 }
 
 @Composable
-fun ListScreen(store: Store, nameMap: Map<String, CardRow>, info: CollectionInfo) {
+fun ListScreen(
+    store: Store,
+    nameMap: Map<String, CardRow>,
+    info: CollectionInfo,
+    tagOptions: List<String>
+) {
     val context = LocalContext.current
     var query by remember { mutableStateOf("") }
     var confirmKey by remember { mutableStateOf<String?>(null) }
@@ -1371,6 +1509,7 @@ fun ListScreen(store: Store, nameMap: Map<String, CardRow>, info: CollectionInfo
     editingInstance?.let { instance ->
         InstanceEditDialog(
             instance = instance,
+            tagOptions = tagOptions,
             onSave = { tags, note ->
                 store.updateInstance(instance.id, tags, note)
                 editingInstance = null
@@ -1385,27 +1524,22 @@ fun ListScreen(store: Store, nameMap: Map<String, CardRow>, info: CollectionInfo
 @Composable
 fun InstanceEditDialog(
     instance: CardInstance,
+    tagOptions: List<String>,
     onSave: (List<String>, String) -> Unit,
     onCancel: () -> Unit
 ) {
-    val defaultTags = listOf(
-        "美品",
-        "傷あり",
-        "お気に入り",
-        "コレクション用",
-        "プレイ用",
-        "未開封"
-    )
-
     var selectedTags by remember(instance.id) {
         mutableStateOf(instance.tags.toSet())
     }
-    var customTag by remember { mutableStateOf("") }
+
     var note by remember(instance.id) {
         mutableStateOf(instance.note)
     }
 
-    val availableTags = (defaultTags + selectedTags).distinct()
+    // 設定画面の並び順を優先し、既存の未登録タグも表示する
+    val displayTags = tagOptions + selectedTags
+        .filterNot { it in tagOptions }
+        .sorted()
 
     AlertDialog(
         onDismissRequest = onCancel,
@@ -1421,7 +1555,7 @@ fun InstanceEditDialog(
             ) {
                 Text("タグ")
 
-                availableTags.forEach { tag ->
+                displayTags.forEach { tag ->
                     Row(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -1435,32 +1569,9 @@ fun InstanceEditDialog(
                                 }
                             }
                         )
+
                         Text(tag)
                     }
-                }
-
-                Spacer(Modifier.height(12.dp))
-
-                Text("独自タグの追加")
-
-                OutlinedTextField(
-                    value = customTag,
-                    onValueChange = { customTag = it },
-                    label = { Text("タグ名") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                TextButton(
-                    onClick = {
-                        val tag = customTag.trim()
-                        if (tag.isNotEmpty()) {
-                            selectedTags = selectedTags + tag
-                            customTag = ""
-                        }
-                    }
-                ) {
-                    Text("タグを追加")
                 }
 
                 Spacer(Modifier.height(12.dp))
@@ -1470,7 +1581,9 @@ fun InstanceEditDialog(
                 OutlinedTextField(
                     value = note,
                     onValueChange = { note = it },
-                    label = { Text("個体ごとのメモ") },
+                    label = {
+                        Text("個体ごとのメモ")
+                    },
                     modifier = Modifier.fillMaxWidth(),
                     minLines = 3
                 )
@@ -1768,4 +1881,324 @@ fun ReplaceDialog(data: CardData?, onPick: (CardRow) -> Unit, onCancel: () -> Un
         confirmButton = {},
         dismissButton = { TextButton(onClick = onCancel) { Text("やめる") } }
     )
+}
+val DEFAULT_TAGS = listOf(
+    "美品",
+    "傷あり",
+    "お気に入り",
+    "コレクション用",
+    "プレイ用",
+    "未開封"
+)
+
+
+@Composable
+fun SettingsScreen(
+    scanIntervalMs: Int,
+    onScanIntervalSave: (Int) -> Unit,
+    tagOptions: List<String>,
+    onAddTag: (String) -> Unit,
+    onDeleteTag: (String) -> Unit,
+    onMoveTag: (Int, Int) -> Unit
+) {
+    var intervalText by remember(scanIntervalMs) {
+        mutableStateOf(scanIntervalMs.toString())
+    }
+
+    var newTag by remember { mutableStateOf("") }
+    var tagToDelete by remember { mutableStateOf<String?>(null) }
+
+    val intervalValue = intervalText.toIntOrNull()
+    val intervalValid = intervalValue != null &&
+            intervalValue in 10..5000
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp)
+    ) {
+        Text(
+            text = "設定",
+            style = MaterialTheme.typography.headlineSmall
+        )
+
+        Spacer(Modifier.height(20.dp))
+
+        Text(
+            text = "カメラ読み取り間隔",
+            style = MaterialTheme.typography.titleMedium
+        )
+
+        Text("読み取り処理を開始する間隔をミリ秒で指定します。")
+
+        OutlinedTextField(
+            value = intervalText,
+            onValueChange = { intervalText = it },
+            label = { Text("読み取り間隔（ms）") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        Text(
+            text = "設定可能範囲：10〜5000ms",
+            style = MaterialTheme.typography.bodySmall
+        )
+
+        TextButton(
+            onClick = {
+                if (intervalValid) {
+                    onScanIntervalSave(intervalValue!!)
+                }
+            },
+            enabled = intervalValid
+        ) {
+            Text("読み取り間隔を保存")
+        }
+
+        Spacer(Modifier.height(28.dp))
+
+        Text(
+            text = "タグ管理",
+            style = MaterialTheme.typography.titleMedium
+        )
+
+        Text(
+            text = "タグの追加・削除・表示順を管理します。",
+            style = MaterialTheme.typography.bodySmall
+        )
+
+        OutlinedTextField(
+            value = newTag,
+            onValueChange = { newTag = it },
+            label = { Text("追加するタグ名") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        TextButton(
+            onClick = {
+                val tag = newTag.trim()
+                if (tag.isNotEmpty() && tag !in tagOptions) {
+                    onAddTag(tag)
+                    newTag = ""
+                }
+            },
+            enabled = newTag.trim().isNotEmpty() &&
+                    newTag.trim() !in tagOptions
+        ) {
+            Text("タグを追加")
+        }
+
+        Spacer(Modifier.height(12.dp))
+
+        Text("登録済みタグ：${tagOptions.size}件")
+
+        tagOptions.forEachIndexed { index, tag ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = tag,
+                    modifier = Modifier.weight(1f)
+                )
+
+                TextButton(
+                    onClick = {
+                        onMoveTag(index, index - 1)
+                    },
+                    enabled = index > 0
+                ) {
+                    Text("↑")
+                }
+
+                TextButton(
+                    onClick = {
+                        onMoveTag(index, index + 1)
+                    },
+                    enabled = index < tagOptions.lastIndex
+                ) {
+                    Text("↓")
+                }
+
+                TextButton(
+                    onClick = {
+                        tagToDelete = tag
+                    }
+                ) {
+                    Text("削除")
+                }
+            }
+        }
+    }
+
+    // タグ削除の確認ダイアログ
+    tagToDelete?.let { tag ->
+        AlertDialog(
+            onDismissRequest = {
+                tagToDelete = null
+            },
+            title = {
+                Text("タグを削除しますか？")
+            },
+            text = {
+                Text(
+                    "「$tag」を削除します。\n" +
+                            "すべてのコレクションに保存されているカード個体からも、このタグが削除されます。"
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onDeleteTag(tag)
+                        tagToDelete = null
+                    }
+                ) {
+                    Text("削除する")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        tagToDelete = null
+                    }
+                ) {
+                    Text("キャンセル")
+                }
+            }
+        )
+    }
+}
+@Composable
+fun SettingsScreen(
+    scanIntervalMs: Int,
+    onScanIntervalChange: (Int) -> Unit,
+    tagOptions: List<String>,
+    onTagOptionsChange: (List<String>) -> Unit
+) {
+    var intervalText by remember(scanIntervalMs) {
+        mutableStateOf(scanIntervalMs.toString())
+    }
+    var newTag by remember { mutableStateOf("") }
+    var message by remember { mutableStateOf("") }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp)
+    ) {
+        Text(
+            text = "設定",
+            style = MaterialTheme.typography.headlineSmall
+        )
+
+        Spacer(Modifier.height(20.dp))
+
+        Text(
+            text = "読み取り速度",
+            style = MaterialTheme.typography.titleMedium
+        )
+
+        Spacer(Modifier.height(8.dp))
+
+        OutlinedTextField(
+            value = intervalText,
+            onValueChange = { intervalText = it },
+            label = { Text("読み取り間隔（ミリ秒）") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        Text(
+            text = "設定可能範囲：10〜5000ミリ秒",
+            style = MaterialTheme.typography.bodySmall
+        )
+
+        TextButton(
+            onClick = {
+                val value = intervalText.toIntOrNull()
+
+                if (value != null && value in 10..5000) {
+                    onScanIntervalChange(value)
+                    message = "読み取り間隔を保存しました"
+                } else {
+                    message = "10〜5000の整数を入力してください"
+                }
+            }
+        ) {
+            Text("読み取り間隔を保存")
+        }
+
+        if (message.isNotEmpty()) {
+            Text(message)
+        }
+
+        Spacer(Modifier.height(24.dp))
+
+        Text(
+            text = "タグ管理",
+            style = MaterialTheme.typography.titleMedium
+        )
+
+        Spacer(Modifier.height(8.dp))
+
+        OutlinedTextField(
+            value = newTag,
+            onValueChange = { newTag = it },
+            label = { Text("新しいタグ名") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        TextButton(
+            onClick = {
+                val tag = newTag.trim()
+
+                when {
+                    tag.isEmpty() -> {
+                        message = "タグ名を入力してください"
+                    }
+                    tag in tagOptions -> {
+                        message = "同じタグが既にあります"
+                    }
+                    else -> {
+                        onTagOptionsChange(tagOptions + tag)
+                        newTag = ""
+                        message = "タグを追加しました"
+                    }
+                }
+            }
+        ) {
+            Text("タグを追加")
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        tagOptions.forEach { tag ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = tag,
+                    modifier = Modifier.weight(1f)
+                )
+
+                TextButton(
+                    onClick = {
+                        onTagOptionsChange(tagOptions - tag)
+                        message = "タグを削除しました"
+                    }
+                ) {
+                    Text("削除")
+                }
+            }
+        }
+    }
 }
