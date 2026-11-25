@@ -1233,6 +1233,15 @@ fun ListScreen(
 ) {
     val context = LocalContext.current
     var query by remember { mutableStateOf("") }
+    // タグ絞り込み用
+    var selectedFilterTags by remember(store) {
+        mutableStateOf(setOf<String>())
+    }
+
+// AND / OR の切り替え
+    var tagMatchMode by remember(store) {
+        mutableStateOf("AND")
+    }
     var confirmKey by remember { mutableStateOf<String?>(null) }
     var message by remember { mutableStateOf("") }
     var decrementKey by remember { mutableStateOf<String?>(null) }
@@ -1241,9 +1250,39 @@ fun ListScreen(
     val entries = store.counts.entries
         .map { (k, v) -> toEntry(k, v, nameMap) }
         .sortedWith(compareBy({ it.setId }, { it.number ?: Int.MAX_VALUE }, { it.name }))
-    val filtered = if (query.isBlank()) entries else entries.filter {
-        "${it.setId} ${it.setName} ${it.number ?: ""} ${it.name}"
-            .contains(query.trim(), ignoreCase = true)
+    // カード個体をカード番号ごとにまとめる
+    val instancesByCard = store.instances.groupBy {
+        it.cardKey
+    }
+
+// カード名検索とタグ検索を組み合わせる
+    val filtered = entries.filter { entry ->
+
+        // 既存の文字検索
+        val matchesQuery = query.isBlank() ||
+                "${entry.setId} ${entry.setName} ${entry.number ?: ""} ${entry.name}"
+                    .contains(query.trim(), ignoreCase = true)
+
+        // タグ検索
+        val matchesTags = if (selectedFilterTags.isEmpty()) {
+            true
+        } else {
+            val cardInstances = instancesByCard[entry.key].orEmpty()
+
+            cardInstances.any { instance ->
+                when (tagMatchMode) {
+                    "AND" -> selectedFilterTags.all {
+                        it in instance.tags
+                    }
+
+                    else -> selectedFilterTags.any {
+                        it in instance.tags
+                    }
+                }
+            }
+        }
+
+        matchesQuery && matchesTags
     }
 
     Column(Modifier.fillMaxSize().padding(8.dp)) {
@@ -1257,6 +1296,86 @@ fun ListScreen(
             singleLine = true,
             modifier = Modifier.fillMaxWidth()
         )
+
+        Spacer(Modifier.height(12.dp))
+
+        Text(
+            text = "タグで絞り込み",
+            style = MaterialTheme.typography.titleSmall
+        )
+
+        if (tagOptions.isNotEmpty()) {
+
+            // AND / OR 切り替え
+            Row(
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedButton(
+                    onClick = { tagMatchMode = "AND" }
+                ) {
+                    Text(
+                        if (tagMatchMode == "AND") {
+                            "✓ AND（すべて）"
+                        } else {
+                            "AND（すべて）"
+                        }
+                    )
+                }
+
+                Spacer(Modifier.width(8.dp))
+
+                OutlinedButton(
+                    onClick = { tagMatchMode = "OR" }
+                ) {
+                    Text(
+                        if (tagMatchMode == "OR") {
+                            "✓ OR（いずれか）"
+                        } else {
+                            "OR（いずれか）"
+                        }
+                    )
+                }
+            }
+
+            // タグ選択一覧
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 140.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                tagOptions.forEach { tag ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Checkbox(
+                            checked = tag in selectedFilterTags,
+                            onCheckedChange = { checked ->
+                                selectedFilterTags =
+                                    if (checked) {
+                                        selectedFilterTags + tag
+                                    } else {
+                                        selectedFilterTags - tag
+                                    }
+                            }
+                        )
+
+                        Text(tag)
+                    }
+                }
+            }
+
+            // 選択解除
+            if (selectedFilterTags.isNotEmpty()) {
+                TextButton(
+                    onClick = {
+                        selectedFilterTags = emptySet()
+                    }
+                ) {
+                    Text("タグ選択を全解除（${selectedFilterTags.size}件選択中）")
+                }
+            }
+        }
         Row(verticalAlignment = Alignment.CenterVertically) {
             OutlinedButton(onClick = {
                 val ok = saveCsvToDownloads(
