@@ -64,6 +64,14 @@ import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicBoolean
 import androidx.compose.foundation.layout.offset
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.widthIn
 
 data class SetInfo(val id: String, val name: String, val official: Int?)
 data class CardRow(val setId: String, val setName: String, val number: Int?, val name: String)
@@ -1242,6 +1250,18 @@ fun ListScreen(
     var tagMatchMode by remember(store) {
         mutableStateOf("AND")
     }
+    // 並び替え設定
+    var sortMode by remember(store) {
+        mutableStateOf("DEFAULT")
+    }
+    // メニュー開閉状態
+    var tagMenuExpanded by remember(store) {
+        mutableStateOf(false)
+    }
+
+    var sortMenuExpanded by remember(store) {
+        mutableStateOf(false)
+    }
     var confirmKey by remember { mutableStateOf<String?>(null) }
     var message by remember { mutableStateOf("") }
     var decrementKey by remember { mutableStateOf<String?>(null) }
@@ -1283,6 +1303,60 @@ fun ListScreen(
         }
 
         matchesQuery && matchesTags
+
+    }.let { result ->
+
+        // 絞り込み後に並び替え
+        when (sortMode) {
+
+            "NAME" -> result.sortedWith(
+                compareBy(
+                    { it.name },
+                    { it.setId },
+                    { it.number ?: Int.MAX_VALUE }
+                )
+            )
+
+            "COUNT_DESC" -> result.sortedWith(
+                Comparator { a, b ->
+                    val countCompare = b.count.compareTo(a.count)
+
+                    if (countCompare != 0) {
+                        countCompare
+                    } else {
+                        val setCompare = a.setId.compareTo(b.setId)
+
+                        if (setCompare != 0) {
+                            setCompare
+                        } else {
+                            (a.number ?: Int.MAX_VALUE)
+                                .compareTo(b.number ?: Int.MAX_VALUE)
+                        }
+                    }
+                }
+            )
+
+            "COUNT_ASC" -> result.sortedWith(
+                Comparator { a, b ->
+                    val countCompare = a.count.compareTo(b.count)
+
+                    if (countCompare != 0) {
+                        countCompare
+                    } else {
+                        val setCompare = a.setId.compareTo(b.setId)
+
+                        if (setCompare != 0) {
+                            setCompare
+                        } else {
+                            (a.number ?: Int.MAX_VALUE)
+                                .compareTo(b.number ?: Int.MAX_VALUE)
+                        }
+                    }
+                }
+            )
+
+            else -> result
+        }
     }
 
     Column(Modifier.fillMaxSize().padding(8.dp)) {
@@ -1297,82 +1371,161 @@ fun ListScreen(
             modifier = Modifier.fillMaxWidth()
         )
 
-        Spacer(Modifier.height(12.dp))
+// タグ・並び替えメニュー
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
 
-        Text(
-            text = "タグで絞り込み",
-            style = MaterialTheme.typography.titleSmall
-        )
-
-        if (tagOptions.isNotEmpty()) {
-
-            // AND / OR 切り替え
-            Row(
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            // タグ絞り込みボタン
+            Box(modifier = Modifier.weight(1f)) {
                 OutlinedButton(
-                    onClick = { tagMatchMode = "AND" }
+                    onClick = { tagMenuExpanded = true },
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text(
-                        if (tagMatchMode == "AND") {
-                            "✓ AND（すべて）"
-                        } else {
-                            "AND（すべて）"
-                        }
+                    Text("タグを選択 (${selectedFilterTags.size})")
+                    Spacer(Modifier.width(4.dp))
+                    Icon(
+                        imageVector = Icons.Default.ArrowDropDown,
+                        contentDescription = null
                     )
                 }
 
-                Spacer(Modifier.width(8.dp))
-
-                OutlinedButton(
-                    onClick = { tagMatchMode = "OR" }
+                DropdownMenu(
+                    expanded = tagMenuExpanded,
+                    onDismissRequest = { tagMenuExpanded = false }
                 ) {
                     Text(
-                        if (tagMatchMode == "OR") {
-                            "✓ OR（いずれか）"
-                        } else {
-                            "OR（いずれか）"
-                        }
+                        "一致条件",
+                        modifier = Modifier.padding(
+                            horizontal = 16.dp,
+                            vertical = 8.dp
+                        ),
+                        style = MaterialTheme.typography.titleSmall
                     )
-                }
-            }
 
-            // タグ選択一覧
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 140.dp)
-                    .verticalScroll(rememberScrollState())
-            ) {
-                tagOptions.forEach { tag ->
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically
+                    DropdownMenuItem(
+                        text = {
+                            Text(if (tagMatchMode == "AND") "✓ AND（すべて）" else "AND（すべて）")
+                        },
+                        onClick = { tagMatchMode = "AND" }
+                    )
+
+                    DropdownMenuItem(
+                        text = {
+                            Text(if (tagMatchMode == "OR") "✓ OR（いずれか）" else "OR（いずれか）")
+                        },
+                        onClick = { tagMatchMode = "OR" }
+                    )
+
+                    HorizontalDivider()
+
+                    Column(
+                        modifier = Modifier
+                            .widthIn(min = 220.dp)
+                            .heightIn(max = 280.dp)
+                            .verticalScroll(rememberScrollState())
                     ) {
-                        Checkbox(
-                            checked = tag in selectedFilterTags,
-                            onCheckedChange = { checked ->
-                                selectedFilterTags =
-                                    if (checked) {
-                                        selectedFilterTags + tag
-                                    } else {
-                                        selectedFilterTags - tag
+                        tagOptions.forEach { tag ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Checkbox(
+                                    checked = tag in selectedFilterTags,
+                                    onCheckedChange = { checked ->
+                                        selectedFilterTags =
+                                            if (checked) {
+                                                selectedFilterTags + tag
+                                            } else {
+                                                selectedFilterTags - tag
+                                            }
                                     }
+                                )
+                                Text(tag)
                             }
-                        )
-
-                        Text(tag)
+                        }
                     }
+
+                    HorizontalDivider()
+
+                    DropdownMenuItem(
+                        text = {
+                            Text("タグ選択を全解除")
+                        },
+                        onClick = {
+                            selectedFilterTags = emptySet()
+                        }
+                    )
                 }
             }
 
-            // 選択解除
-            if (selectedFilterTags.isNotEmpty()) {
-                TextButton(
-                    onClick = {
-                        selectedFilterTags = emptySet()
-                    }
+            // 並び替えボタン
+            Box(modifier = Modifier.weight(1f)) {
+                OutlinedButton(
+                    onClick = { sortMenuExpanded = true },
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("タグ選択を全解除（${selectedFilterTags.size}件選択中）")
+                    Text(
+                        when (sortMode) {
+                            "NAME" -> "並び替え：名前順"
+                            "COUNT_DESC" -> "並び替え：枚数が多い順"
+                            "COUNT_ASC" -> "並び替え：枚数が少ない順"
+                            else -> "並び替え"
+                        }
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Icon(
+                        imageVector = Icons.Default.ArrowDropDown,
+                        contentDescription = null
+                    )
+                }
+
+                DropdownMenu(
+                    expanded = sortMenuExpanded,
+                    onDismissRequest = { sortMenuExpanded = false }
+                ) {
+                    DropdownMenuItem(
+                        text = {
+                            Text(if (sortMode == "DEFAULT") "✓ 標準（セット・番号順）" else "標準（セット・番号順）")
+                        },
+                        onClick = {
+                            sortMode = "DEFAULT"
+                            sortMenuExpanded = false
+                        }
+                    )
+
+                    DropdownMenuItem(
+                        text = {
+                            Text(if (sortMode == "NAME") "✓ カード名順" else "カード名順")
+                        },
+                        onClick = {
+                            sortMode = "NAME"
+                            sortMenuExpanded = false
+                        }
+                    )
+
+                    DropdownMenuItem(
+                        text = {
+                            Text(if (sortMode == "COUNT_DESC") "✓ 枚数が多い順" else "枚数が多い順")
+                        },
+                        onClick = {
+                            sortMode = "COUNT_DESC"
+                            sortMenuExpanded = false
+                        }
+                    )
+
+                    DropdownMenuItem(
+                        text = {
+                            Text(if (sortMode == "COUNT_ASC") "✓ 枚数が少ない順" else "枚数が少ない順")
+                        },
+                        onClick = {
+                            sortMode = "COUNT_ASC"
+                            sortMenuExpanded = false
+                        }
+                    )
                 }
             }
         }
