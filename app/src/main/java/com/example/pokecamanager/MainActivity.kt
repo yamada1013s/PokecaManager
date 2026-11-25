@@ -63,10 +63,18 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicBoolean
 import androidx.compose.foundation.layout.offset
+import androidx.compose.material3.Checkbox
 
 data class SetInfo(val id: String, val name: String, val official: Int?)
 data class CardRow(val setId: String, val setName: String, val number: Int?, val name: String)
-class CardData(
+
+data class CardInstance(
+    val id: String,
+    val cardKey: String,
+    val card: CardRow,
+    val tags: List<String> = emptyList(),
+    val note: String = ""
+)class CardData(
     val setsByOfficial: Map<Int, List<SetInfo>>,
     val cardsBySet: Map<String, List<CardRow>>
 )
@@ -94,29 +102,232 @@ fun safeFileName(s: String): String {
     return if (t.isEmpty()) "cards" else t
 }
 
-class Store(private val prefs: SharedPreferences) {
+class Store(
+    private val prefs: SharedPreferences,
+    private val nameMap: Map<String, CardRow>
+) {
     val counts = mutableStateMapOf<String, Int>()
+    val instances = mutableStateListOf<CardInstance>()
     var lastCard by mutableStateOf<CardRow?>(null)
     var currentSetId by mutableStateOf<String?>(null)
 
     // 直近5件の登録履歴
     val history = mutableStateListOf<CardRow>()
-
+    val historyInstanceIds = mutableStateListOf<String?>()
     init {
         prefs.all.forEach { (k, v) ->
             if (v is Int && v > 0) counts[k] = v
         }
+
+        loadInstances()
+
+        if (!prefs.getBoolean("instances_migrated", false)) {
+            migrateInstances()
+        }
+
         loadHistory()
     }
+    private fun loadInstances() {
+        instances.clear()
 
+        val json = prefs.getString("card_instances", null) ?: return
+
+        try {
+            val array = JSONArray(json)
+
+            for (i in 0 until array.length()) {
+                val obj = array.getJSONObject(i)
+
+                val cardObj = obj.getJSONObject("card")
+
+                val card = CardRow(
+                    setId = cardObj.getString("setId"),
+                    setName = cardObj.getString("setName"),
+                    number = if (cardObj.isNull("number")) null
+                    else cardObj.getInt("number"),
+                    name = cardObj.getString("name")
+                )
+
+                val tagsArray = obj.getJSONArray("tags")
+                val tags = mutableListOf<String>()
+
+                for (j in 0 until tagsArray.length()) {
+                    tags.add(tagsArray.getString(j))
+                }
+
+                instances.add(
+                    CardInstance(
+                        id = obj.getString("id"),
+                        cardKey = obj.getString("cardKey"),
+                        card = card,
+                        tags = tags,
+                        note = obj.optString("note", "")
+                    )
+                )
+            }
+        } catch (e: Exception) {
+            instances.clear()
+            android.util.Log.e(
+                "PokecaManager",
+                "個体データの読み込みに失敗しました",
+                e
+            )
+        }
+    }
+
+    private fun saveInstances() {
+        val array = JSONArray()
+
+        instances.forEach { instance ->
+            val cardObj = JSONObject()
+                .put("setId", instance.card.setId)
+                .put("setName", instance.card.setName)
+                .put("number", instance.card.number ?: JSONObject.NULL)
+                .put("name", instance.card.name)
+
+            val tagsArray = JSONArray()
+            instance.tags.forEach { tagsArray.put(it) }
+
+            array.put(
+                JSONObject()
+                    .put("id", instance.id)
+                    .put("cardKey", instance.cardKey)
+                    .put("card", cardObj)
+                    .put("tags", tagsArray)
+                    .put("note", instance.note)
+            )
+        }
+
+        prefs.edit()
+            .putString("card_instances", array.toString())
+            .apply()
+    }
+    // 個体データの枚数をcountsに反映する
+    private fun updateCount(key: String) {
+        val count = instances.count { it.cardKey == key }
+
+        if (count <= 0) {
+            counts.remove(key)
+            prefs.edit().remove(key).apply()
+        } else {
+            counts[key] = count
+            prefs.edit().putInt(key, count).apply()
+        }
+    }
+
+    // 個体データを1枚追加する
+    private fun addInstance(card: CardRow): CardInstance {
+        val key = keyOf(card)
+
+        val instance = CardInstance(
+            id = java.util.UUID.randomUUID().toString(),
+            cardKey = key,
+            card = card
+        )
+
+        instances.add(instance)
+        saveInstances()
+        updateCount(key)
+
+        return instance
+    }
+
+    // 指定した個体データを1枚削除する
+    fun removeInstance(id: String): CardRow? {
+        val instance = instances.firstOrNull { it.id == id } ?: return null
+
+        instances.remove(instance)
+        saveInstances()
+        updateCount(instance.cardKey)
+
+        // 削除した個体に紐づく登録履歴も削除する
+        val historyIndex = historyInstanceIds.indexOf(id)
+        if (historyIndex >= 0) {
+            history.removeAt(historyIndex)
+            historyInstanceIds.removeAt(historyIndex)
+            saveHistory()
+        }
+
+        return instance.card
+    }
+    // タグ・メモのない個体を優先して1枚削除する
+    fun removeUnannotatedInstance(key: String): Boolean {
+        val instance = instances.firstOrNull {
+            it.cardKey == key &&
+                    it.tags.isEmpty() &&
+                    it.note.isBlank()
+        } ?: return false
+
+        removeInstance(instance.id)
+        return true
+    }
+    fun updateInstance(
+        id: String,
+        tags: List<String>,
+        note: String
+    ) {
+        val index = instances.indexOfFirst { it.id == id }
+        if (index < 0) return
+
+        instances[index] = instances[index].copy(
+            tags = tags,
+            note = note
+        )
+
+        saveInstances()
+    }
+
+    // 一覧画面から新しい個体を追加する
+    fun addCardInstance(card: CardRow) {
+        addInstance(card)
+    }
+    private fun migrateInstances() {
+        var allResolved = true
+
+        counts.forEach { (key, count) ->
+            val existingCount = instances.count { it.cardKey == key }
+
+            // すでに個体データがある場合、不足分だけ追加する
+            if (existingCount >= count) {
+                return@forEach
+            }
+
+            val card = nameMap[key]
+            if (card == null) {
+                allResolved = false
+                return@forEach
+            }
+
+            repeat(count - existingCount) {
+                instances.add(
+                    CardInstance(
+                        id = java.util.UUID.randomUUID().toString(),
+                        cardKey = key,
+                        card = card
+                    )
+                )
+            }
+        }
+
+        saveInstances()
+
+        // すべてのカード情報を確認できた場合だけ移行済みにする
+        if (allResolved) {
+            prefs.edit().putBoolean("instances_migrated", true).apply()
+        }
+    }
     private fun loadHistory() {
         history.clear()
+        historyInstanceIds.clear()
+
         val json = prefs.getString("registration_history", null) ?: return
 
         try {
             val array = JSONArray(json)
+
             for (i in 0 until array.length()) {
                 val obj = array.getJSONObject(i)
+
                 history.add(
                     CardRow(
                         setId = obj.getString("setId"),
@@ -126,22 +337,27 @@ class Store(private val prefs: SharedPreferences) {
                         name = obj.getString("name")
                     )
                 )
+
+                val instanceId = obj.optString("instanceId", "")
+                historyInstanceIds.add(instanceId.ifBlank { null })
             }
         } catch (e: Exception) {
             history.clear()
+            historyInstanceIds.clear()
         }
     }
 
     private fun saveHistory() {
         val array = JSONArray()
 
-        history.take(5).forEach { card ->
+        history.take(5).forEachIndexed { index, card ->
             array.put(
                 JSONObject()
                     .put("setId", card.setId)
                     .put("setName", card.setName)
                     .put("number", card.number ?: JSONObject.NULL)
                     .put("name", card.name)
+                    .put("instanceId", historyInstanceIds.getOrNull(index) ?: JSONObject.NULL)
             )
         }
 
@@ -150,29 +366,22 @@ class Store(private val prefs: SharedPreferences) {
             .apply()
     }
 
-    fun set(key: String, n: Int) {
-        if (n <= 0) {
-            counts.remove(key)
-            prefs.edit().remove(key).apply()
-        } else {
-            counts[key] = n
-            prefs.edit().putInt(key, n).apply()
-        }
-    }
 
-    fun add(key: String, d: Int) {
-        set(key, (counts[key] ?: 0) + d)
-    }
 
     fun register(card: CardRow): Int {
         val k = keyOf(card)
-        add(k, 1)
+
+        val instance = addInstance(card)
         lastCard = card
 
         history.add(0, card)
+        historyInstanceIds.add(0, instance.id)
+
         while (history.size > 5) {
             history.removeAt(history.lastIndex)
+            historyInstanceIds.removeAt(historyInstanceIds.lastIndex)
         }
+
         saveHistory()
 
         return counts[k] ?: 0
@@ -189,13 +398,21 @@ class Store(private val prefs: SharedPreferences) {
         if (index !in history.indices) return null
 
         val card = history[index]
-        val key = keyOf(card)
+        val instanceId = historyInstanceIds.getOrNull(index)
 
-        if ((counts[key] ?: 0) <= 0) return null
+        val removed = if (instanceId != null) {
+            removeInstance(instanceId)
+        } else {
+            // 旧バージョンの履歴など、個体IDがない場合の互換処理
+            val key = keyOf(card)
+            val instance = instances.firstOrNull { it.cardKey == key }
+                ?: return null
+            removeInstance(instance.id)
+        }
 
-        add(key, -1)
-        history.removeAt(index)
+        if (removed == null) return null
 
+        // removeInstance側で履歴も削除されている
         lastCard = history.firstOrNull()
         saveHistory()
 
@@ -210,11 +427,30 @@ class Store(private val prefs: SharedPreferences) {
         val oldKey = keyOf(oldCard)
         val newKey = keyOf(newCard)
 
-        if ((counts[oldKey] ?: 0) <= 0) return 0
+        // 履歴に紐づく個体を特定
+        var instanceId = historyInstanceIds.getOrNull(index)
+        var instanceIndex = instances.indexOfFirst { it.id == instanceId }
+
+        // 旧履歴などでIDがない場合はカードキーから探す
+        if (instanceIndex < 0) {
+            instanceIndex = instances.indexOfFirst { it.cardKey == oldKey }
+            if (instanceIndex < 0) return 0
+
+            instanceId = instances[instanceIndex].id
+            historyInstanceIds[index] = instanceId
+        }
+        if (instanceIndex < 0) return 0
+        // 同じ個体IDのままカード情報を差し替える
+        instances[instanceIndex] = instances[instanceIndex].copy(
+            cardKey = newKey,
+            card = newCard
+        )
+
+        saveInstances()
 
         if (oldKey != newKey) {
-            add(oldKey, -1)
-            add(newKey, 1)
+            updateCount(oldKey)
+            updateCount(newKey)
         }
 
         history[index] = newCard
@@ -233,7 +469,13 @@ class Store(private val prefs: SharedPreferences) {
         val old = lastCard
         if (old != null) {
             val oldKey = keyOf(old)
-            if ((counts[oldKey] ?: 0) > 0) add(oldKey, -1)
+            val oldInstance = instances.firstOrNull {
+                it.cardKey == oldKey
+            }
+
+            if (oldInstance != null) {
+                removeInstance(oldInstance.id)
+            }
         }
 
         return register(card)
@@ -453,12 +695,17 @@ fun AppRoot(owner: LifecycleOwner) {
     val lib = remember {
         Library(context.getSharedPreferences("collections", Context.MODE_PRIVATE))
     }
+
     val activeInfo = lib.items.firstOrNull { it.id == lib.activeId } ?: lib.items[0]
-    val store = remember(lib.activeId) {
-        Store(context.getSharedPreferences(prefsName(lib.activeId), Context.MODE_PRIVATE))
-    }
+
     val nameMap = remember(data) {
         data?.cardsBySet?.values?.flatten()?.associateBy { keyOf(it) } ?: emptyMap()
+    }
+    val store = remember(lib.activeId, nameMap) {
+        Store(
+            context.getSharedPreferences(prefsName(lib.activeId), Context.MODE_PRIVATE),
+            nameMap
+        )
     }
     var tab by remember { mutableStateOf(0) }
 
@@ -850,7 +1097,9 @@ fun ListScreen(store: Store, nameMap: Map<String, CardRow>, info: CollectionInfo
     var query by remember { mutableStateOf("") }
     var confirmKey by remember { mutableStateOf<String?>(null) }
     var message by remember { mutableStateOf("") }
-
+    var decrementKey by remember { mutableStateOf<String?>(null) }
+    var editKey by remember { mutableStateOf<String?>(null) }
+    var editingInstance by remember { mutableStateOf<CardInstance?>(null) }
     val entries = store.counts.entries
         .map { (k, v) -> toEntry(k, v, nameMap) }
         .sortedWith(compareBy({ it.setId }, { it.number ?: Int.MAX_VALUE }, { it.name }))
@@ -896,13 +1145,53 @@ fun ListScreen(store: Store, nameMap: Map<String, CardRow>, info: CollectionInfo
                             style = MaterialTheme.typography.titleMedium,
                             modifier = Modifier.width(64.dp)
                         )
-                        OutlinedButton(onClick = {
-                            if (e.count > 1) store.add(e.key, -1)
-                        }) { Text("−") }
+                        OutlinedButton(
+                            onClick = {
+                                if (e.count > 1) {
+                                    val removed = store.removeUnannotatedInstance(e.key)
+
+                                    if (!removed) {
+                                        decrementKey = e.key
+                                    }
+                                }
+                            }
+                        ) {
+                            Text("−")
+                        }
+
                         Spacer(Modifier.width(8.dp))
-                        OutlinedButton(onClick = { store.add(e.key, 1) }) { Text("＋") }
+
+                        OutlinedButton(
+                            onClick = {
+                                val card = nameMap[e.key]
+                                if (card != null) {
+                                    store.addCardInstance(card)
+                                } else {
+                                    message = "カード情報を取得できませんでした"
+                                }
+                            }
+                        ) {
+                            Text("＋")
+                        }
+
                         Spacer(Modifier.width(8.dp))
-                        OutlinedButton(onClick = { confirmKey = e.key }) { Text("削除") }
+
+                        OutlinedButton(
+                            onClick = {
+                                confirmKey = e.key
+                            }
+                        ) {
+                            Text("削除")
+                        }
+                        Spacer(Modifier.width(8.dp))
+
+                        OutlinedButton(
+                            onClick = {
+                                editKey = e.key
+                            }
+                        ) {
+                            Text("個体編集")
+                        }
                     }
                     Spacer(Modifier.height(4.dp))
                 }
@@ -911,23 +1200,298 @@ fun ListScreen(store: Store, nameMap: Map<String, CardRow>, info: CollectionInfo
     }
 
     confirmKey?.let { k ->
+        val targets = store.instances.filter { it.cardKey == k }
+
         AlertDialog(
             onDismissRequest = { confirmKey = null },
-            title = { Text("削除しますか?") },
-            text = { Text(nameMap[k]?.name ?: k) },
-            confirmButton = {
-                TextButton(onClick = {
-                    store.set(k, 0)
-                    confirmKey = null
-                }) { Text("削除する") }
+            title = {
+                Text("削除する個体を選択")
             },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 350.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    Text(nameMap[k]?.name ?: k)
+
+                    if (targets.isEmpty()) {
+                        Text("削除できる個体データがありません")
+                    }
+
+                    targets.forEachIndexed { index, instance ->
+                        OutlinedButton(
+                            onClick = {
+                                store.removeInstance(instance.id)
+                                confirmKey = null
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column {
+                                Text("個体 ${index + 1} を削除")
+                                Text(
+                                    if (instance.tags.isEmpty()) {
+                                        "タグなし"
+                                    } else {
+                                        "タグ: ${instance.tags.joinToString(" / ")}"
+                                    }
+                                )
+                                Text(
+                                    if (instance.note.isBlank()) {
+                                        "メモなし"
+                                    } else {
+                                        "メモ: ${instance.note}"
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
             dismissButton = {
-                TextButton(onClick = { confirmKey = null }) { Text("やめる") }
+                TextButton(
+                    onClick = { confirmKey = null }
+                ) {
+                    Text("閉じる")
+                }
+            }
+        )
+    }
+        decrementKey?.let { k ->
+            val targets = store.instances.filter { it.cardKey == k }
+
+            AlertDialog(
+                onDismissRequest = { decrementKey = null },
+                title = {
+                    Text("1枚減らす個体を選択")
+                },
+                text = {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 350.dp)
+                            .verticalScroll(rememberScrollState())
+                    ) {
+                        Text(nameMap[k]?.name ?: k)
+
+                        targets.forEachIndexed { index, instance ->
+                            OutlinedButton(
+                                onClick = {
+                                    store.removeInstance(instance.id)
+                                    decrementKey = null
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column {
+                                    Text("個体 ${index + 1}")
+                                    Text(
+                                        if (instance.tags.isEmpty()) {
+                                            "タグなし"
+                                        } else {
+                                            "タグ: ${instance.tags.joinToString(" / ")}"
+                                        }
+                                    )
+                                    Text(
+                                        if (instance.note.isBlank()) {
+                                            "メモなし"
+                                        } else {
+                                            "メモ: ${instance.note}"
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                },
+                confirmButton = {},
+                dismissButton = {
+                    TextButton(
+                        onClick = { decrementKey = null }
+                    ) {
+                        Text("閉じる")
+                    }
+                }
+            )
+        }
+    editKey?.let { k ->
+        val targets = store.instances.filter { it.cardKey == k }
+
+        AlertDialog(
+            onDismissRequest = { editKey = null },
+            title = {
+                Text("編集する個体を選択")
+            },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 350.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    targets.forEachIndexed { index, instance ->
+                        OutlinedButton(
+                            onClick = {
+                                editingInstance = instance
+                                editKey = null
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column {
+                                Text("個体 ${index + 1}")
+                                Text(
+                                    if (instance.tags.isEmpty()) {
+                                        "タグなし"
+                                    } else {
+                                        "タグ: ${instance.tags.joinToString(" / ")}"
+                                    }
+                                )
+                                Text(
+                                    if (instance.note.isBlank()) {
+                                        "メモなし"
+                                    } else {
+                                        "メモ: ${instance.note}"
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { editKey = null }) {
+                    Text("閉じる")
+                }
+            }
+        )
+    }
+
+    editingInstance?.let { instance ->
+        InstanceEditDialog(
+            instance = instance,
+            onSave = { tags, note ->
+                store.updateInstance(instance.id, tags, note)
+                editingInstance = null
+                message = "個体情報を保存しました"
+            },
+            onCancel = {
+                editingInstance = null
             }
         )
     }
 }
+@Composable
+fun InstanceEditDialog(
+    instance: CardInstance,
+    onSave: (List<String>, String) -> Unit,
+    onCancel: () -> Unit
+) {
+    val defaultTags = listOf(
+        "美品",
+        "傷あり",
+        "お気に入り",
+        "コレクション用",
+        "プレイ用",
+        "未開封"
+    )
 
+    var selectedTags by remember(instance.id) {
+        mutableStateOf(instance.tags.toSet())
+    }
+    var customTag by remember { mutableStateOf("") }
+    var note by remember(instance.id) {
+        mutableStateOf(instance.note)
+    }
+
+    val availableTags = (defaultTags + selectedTags).distinct()
+
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = {
+            Text("個体情報の編集")
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 450.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                Text("タグ")
+
+                availableTags.forEach { tag ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Checkbox(
+                            checked = tag in selectedTags,
+                            onCheckedChange = { checked ->
+                                selectedTags = if (checked) {
+                                    selectedTags + tag
+                                } else {
+                                    selectedTags - tag
+                                }
+                            }
+                        )
+                        Text(tag)
+                    }
+                }
+
+                Spacer(Modifier.height(12.dp))
+
+                Text("独自タグの追加")
+
+                OutlinedTextField(
+                    value = customTag,
+                    onValueChange = { customTag = it },
+                    label = { Text("タグ名") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                TextButton(
+                    onClick = {
+                        val tag = customTag.trim()
+                        if (tag.isNotEmpty()) {
+                            selectedTags = selectedTags + tag
+                            customTag = ""
+                        }
+                    }
+                ) {
+                    Text("タグを追加")
+                }
+
+                Spacer(Modifier.height(12.dp))
+
+                Text("メモ")
+
+                OutlinedTextField(
+                    value = note,
+                    onValueChange = { note = it },
+                    label = { Text("個体ごとのメモ") },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 3
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    onSave(selectedTags.toList(), note)
+                }
+            ) {
+                Text("保存")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onCancel) {
+                Text("キャンセル")
+            }
+        }
+    )
+}
 @Composable
 fun ManualScreen(data: CardData?, store: Store, listName: String) {
     var nameQ by remember { mutableStateOf("") }
