@@ -21,13 +21,13 @@ python tools/card_master/build_japanese_master.py
 
 The first run downloads the Japanese set index and each Japanese set detail into `.cache/cardcorpus-ja/`. Later runs reuse the cache. Delete that cache directory to force a fresh download.
 
-The script writes:
+The script writes to `build/card-master/` by default:
 
-- `app/src/main/assets/cards_ja_final.csv`
-- `app/src/main/assets/sets_info.csv`
-- `app/src/main/assets/data_check.csv`
+- `build/card-master/cards_ja_final.csv`
+- `build/card-master/sets_info.csv`
+- `build/card-master/data_check.csv`
 
-It does not change collection records, app code, or the current master automatically. It writes generated CSVs only when at least one card has been retrieved.
+It does not change collection records, app code, or the current master automatically. The output is kept separate from app assets until reviewed. If any set download fails, it stops without writing CSV files, preventing a partial dataset from replacing a complete one.
 
 ## Review policy
 
