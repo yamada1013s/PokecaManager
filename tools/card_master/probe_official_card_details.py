@@ -20,7 +20,7 @@ USER_AGENT = "PokecaManager-card-master-research/1.0 (manual research run)"
 
 
 def clean(value: str) -> str:
-    return re.sub(r"\\s+", " ", value or "").strip()
+    return re.sub(r"\s+", " ", value or "").strip()
 
 
 def inspect_page(card_id: str, html: str) -> dict:
@@ -43,7 +43,7 @@ def inspect_page(card_id: str, html: str) -> dict:
                 for node in found[:12]
             ]
 
-    text_lines = [clean(line) for line in soup.get_text("\\n").splitlines()]
+    text_lines = [clean(line) for line in soup.get_text("\n").splitlines()]
     text_lines = [line for line in text_lines if line]
     scripts = []
     for script in soup.find_all("script"):
@@ -55,7 +55,7 @@ def inspect_page(card_id: str, html: str) -> dict:
     card_name = clean(soup.find("h1").get_text(" ", strip=True)) if soup.find("h1") else ""
     left_box = soup.select_one(".LeftBox")
     left_box_text = clean(left_box.get_text(" ", strip=True)) if left_box else ""
-    number_match = re.search(r"(?<!\\d)(\\d{1,3}\\s*/\\s*\\d{1,3})(?!\\d)", left_box_text)
+    number_match = re.search(r"(?<!\d)(\d{1,3}\s*/\s*\d{1,3})(?!\d)", left_box_text)
     card_number = clean(number_match.group(1)) if number_match else None
 
     card_image = None
