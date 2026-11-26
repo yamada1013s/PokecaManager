@@ -31,3 +31,4 @@ secrets.properties
 
 # OS files
 Thumbs.db
+.idea/deploymentTargetSelector.xml
