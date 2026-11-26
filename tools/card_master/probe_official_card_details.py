@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Probe the official Japanese card detail page before building a bulk scraper.
-
-This deliberately fetches only a tiny sample and records HTML structure. It does
-not generate or modify the production card master.
-"""
+"""Probe official Japanese card detail pages before building a bulk scraper."""
 from __future__ import annotations
 
 import argparse
@@ -23,18 +19,36 @@ USER_AGENT = "PokecaManager-card-master-research/1.0 (manual research run)"
 
 
 def clean(value: str) -> str:
-    return re.sub(r"\\s+", " ", value or "").strip()
+    return re.sub(r"\s+", " ", value or "").strip()
 
 
 def inspect_page(card_id: str, html: str) -> dict:
     soup = BeautifulSoup(html, "html.parser")
     selectors = [".TopInfo", ".LeftBox", ".RightBox", ".cardName", ".CardName",
-                 "[class*='Name']", "[class*='Number']", "[id*='card']"]
+                 "[class*='Name']", "[class*='Number']", "[class*='Info']",
+                 "[class*='Detail']", "[id*='card']", "[data-card-id]"]
     blocks = {}
     for selector in selectors:
         found = soup.select(selector)
         if found:
-            blocks[selector] = [clean(node.get_text(" ", strip=True))[:1200] for node in found[:8]]
+            blocks[selector] = [
+                {
+                    "text": clean(node.get_text(" ", strip=True))[:1600],
+                    "id": node.get("id"),
+                    "class": node.get("class"),
+                    "attrs": {k: v for k, v in node.attrs.items()
+                              if k.startswith("data-") or k in ("title", "alt", "href")}
+                }
+                for node in found[:12]
+            ]
+    text_lines = [clean(line) for line in soup.get_text("\n").splitlines()]
+    text_lines = [line for line in text_lines if line]
+    scripts = []
+    for script in soup.find_all("script"):
+        script_text = script.string or script.get_text()
+        if script_text and any(token in script_text.lower()
+                               for token in ("card", "name", "number", "regulation", "pack")):
+            scripts.append(clean(script_text)[:2500])
     return {
         "official_card_id": card_id,
         "url": DETAIL_URL.format(card_id=card_id),
@@ -42,6 +56,12 @@ def inspect_page(card_id: str, html: str) -> dict:
         "h1": [clean(x.get_text(" ", strip=True)) for x in soup.find_all("h1")[:10]],
         "h2": [clean(x.get_text(" ", strip=True)) for x in soup.find_all("h2")[:20]],
         "blocks": blocks,
+        "visible_text": text_lines[:250],
+        "scripts_with_card_terms": scripts[:20],
+        "images": [
+            {"alt": img.get("alt", ""), "src": img.get("src", ""), "class": img.get("class")}
+            for img in soup.find_all("img")[:30]
+        ],
         "meta": {
             x.get("property") or x.get("name"): x.get("content", "")
             for x in soup.find_all("meta")
@@ -71,10 +91,17 @@ def main() -> int:
     if not ids:
         raise SystemExit("No numeric official_card_id values found in the discovery CSV")
 
+    if args.max_cards == 1:
+        sample_ids = [ids[len(ids) // 2]]
+    else:
+        sample_indexes = sorted({round(i * (len(ids) - 1) / (args.max_cards - 1))
+                                 for i in range(args.max_cards)})
+        sample_ids = [ids[i] for i in sample_indexes]
+
     session = requests.Session()
     session.headers.update({"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml"})
     results = []
-    for index, card_id in enumerate(ids[:args.max_cards]):
+    for index, card_id in enumerate(sample_ids):
         if index:
             time.sleep(args.delay + random.uniform(0, 0.5))
         url = DETAIL_URL.format(card_id=card_id)
@@ -92,6 +119,7 @@ def main() -> int:
     )
     print(json.dumps({
         "sample_count": len(results),
+        "sampled_ids": sample_ids,
         "samples": results,
         "note": "Schema probe only. No bulk detail crawl and no production CSV were generated."
     }, ensure_ascii=False, indent=2))
