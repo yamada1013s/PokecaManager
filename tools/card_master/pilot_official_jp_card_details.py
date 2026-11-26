@@ -22,7 +22,7 @@ PRODUCT_LABEL = re.compile(r"(拡張パック|強化拡張パック|コンセプ
 
 
 def clean(value: str) -> str:
-    return re.sub(r"\\s+", " ", value or "").strip()
+    return re.sub(r"\s+", " ", value or "").strip()
 
 
 def parse_card(card_id: str, html: str) -> tuple[dict, list[dict], list[str]]:
@@ -31,7 +31,7 @@ def parse_card(card_id: str, html: str) -> tuple[dict, list[dict], list[str]]:
     name = clean(h1.get_text(" ", strip=True)) if h1 else ""
     left = soup.select_one(".LeftBox")
     left_text = clean(left.get_text(" ", strip=True)) if left else ""
-    number_match = re.search(r"(?<!\\d)(\\d{1,3}\\s*/\\s*\\d{1,3})(?!\\d)", left_text)
+    number_match = re.search(r"(?<!\d)(\d{1,3}\s*/\s*\d{1,3})(?!\d)", left_text)
     number = clean(number_match.group(1)) if number_match else ""
 
     image = None
