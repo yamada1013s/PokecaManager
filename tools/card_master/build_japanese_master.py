@@ -57,7 +57,7 @@ def write_csv(path: Path, fields: list[str], rows: list[dict[str, Any]]) -> None
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate Japanese Pokémon card master CSV files.")
-    parser.add_argument("--output-dir", default="app/src/main/assets", help="Directory for generated CSV files")
+    parser.add_argument("--output-dir", default="build/card-master", help="Directory for generated CSV files (kept separate from app assets until reviewed)")
     parser.add_argument("--cache-dir", default=".cache/cardcorpus-ja", help="Downloaded JSON cache")
     parser.add_argument("--delay", type=float, default=0.15, help="Delay between uncached set downloads")
     args = parser.parse_args()
@@ -85,6 +85,7 @@ def main() -> int:
         safe_name = set_id.replace("/", "__")
         detail_path = cache_dir / "sets" / f"{safe_name}.json"
         detail_url = f"{BASE_URL}/sets/{set_id}.json"
+        was_cached = detail_path.exists()
         try:
             detail = fetch_json(detail_url, detail_path)
         except Exception as exc:
@@ -147,7 +148,7 @@ def main() -> int:
 
         if position % 25 == 0:
             print(f"Processed {position}/{len(sets)} sets; {len(card_rows)} cards so far.", flush=True)
-        if not detail_path.exists() and args.delay > 0:
+        if not was_cached and args.delay > 0:
             time.sleep(args.delay)
 
     # Detect duplicate printed numbers inside one set; these are review candidates, not auto-deleted.
@@ -163,8 +164,10 @@ def main() -> int:
 
     if set_file_errors:
         print(f"WARNING: {set_file_errors} set files failed; output is incomplete.", file=sys.stderr)
+    if set_file_errors:
+        raise RuntimeError(f"{set_file_errors} set files failed. No CSV files were written; fix the network/source issue and rerun.")
     if not card_rows:
-        raise RuntimeError("No cards were generated; refusing to overwrite existing assets.")
+        raise RuntimeError("No cards were generated; refusing to write empty master files.")
 
     write_csv(output_dir / "cards_ja_final.csv", CARD_FIELDS, card_rows)
     write_csv(output_dir / "sets_info.csv", SET_FIELDS, set_rows)
