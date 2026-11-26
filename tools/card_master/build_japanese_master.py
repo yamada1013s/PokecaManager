@@ -41,9 +41,22 @@ def fetch_json(url: str, cache_file: Path, retries: int = 4) -> dict[str, Any]:
             parsed = json.loads(data.decode("utf-8-sig"))
             cache_file.write_text(json.dumps(parsed, ensure_ascii=False), encoding="utf-8")
             return parsed
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            # Respect Retry-After when the server provides it. For rate limiting,
+            # wait at least 30 seconds before retrying rather than hammering the API.
+            retry_after = exc.headers.get("Retry-After", "")
+            try:
+                server_wait = max(0, int(retry_after))
+            except (TypeError, ValueError):
+                server_wait = 0
+            backoff = min(2 ** (attempt + 1), 30)
+            if exc.code == 429:
+                backoff = max(backoff, 30)
+            time.sleep(max(server_wait, backoff))
         except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
             last_error = exc
-            time.sleep(min(2 ** attempt, 12))
+            time.sleep(min(2 ** (attempt + 1), 30))
     raise RuntimeError(f"Failed to fetch {url}: {last_error}")
 
 
@@ -59,7 +72,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Generate Japanese Pokémon card master CSV files.")
     parser.add_argument("--output-dir", default="build/card-master", help="Directory for generated CSV files (kept separate from app assets until reviewed)")
     parser.add_argument("--cache-dir", default=".cache/cardcorpus-ja", help="Downloaded JSON cache")
-    parser.add_argument("--delay", type=float, default=0.15, help="Delay between uncached set downloads")
+    parser.add_argument("--delay", type=float, default=2.0, help="Minimum delay in seconds between uncached set downloads (default: 2)")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -74,6 +87,10 @@ def main() -> int:
     checks: list[dict[str, Any]] = []
     seen_card_ids: set[str] = set()
     set_file_errors = 0
+
+    # Keep a pause after the catalog-index request too, before requesting set details.
+    if args.delay > 0:
+        time.sleep(args.delay)
 
     for position, set_info in enumerate(sets, start=1):
         set_id = str(set_info.get("id") or "")
