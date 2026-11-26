@@ -1,0 +1,59 @@
+name: Probe official Japanese card detail schema
+
+on:
+  workflow_dispatch:
+    inputs:
+      discovery_run_id:
+        description: "Run ID of the successful Discover official Japanese card IDs workflow"
+        required: true
+        type: string
+      max_cards:
+        description: "Sample size (1-5 only; schema probe)"
+        required: true
+        default: "1"
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: python -m pip install requests beautifulsoup4
+
+      - name: Download verified discovery artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SOURCE_RUN_ID: ${{ inputs.discovery_run_id }}
+        run: |
+          mkdir -p build/input
+          gh run download "$SOURCE_RUN_ID" --repo "$GH_REPO" --name official-jp-card-discovery --dir build/input
+
+      - name: Probe official card detail pages
+        run: |
+          python tools/card_master/probe_official_card_details.py \
+            --ids-csv build/input/official_card_ids.csv \
+            --max-cards "${{ inputs.max_cards }}" \
+            --delay 3 \
+            --output-dir build/official-jp-detail-probe
+
+      - name: Upload schema probe
+        uses: actions/upload-artifact@v4
+        with:
+          name: official-jp-detail-schema-probe
+          path: build/official-jp-detail-probe/
+          if-no-files-found: error
+          retention-days: 14
