@@ -1,0 +1,40 @@
+name: Build Japanese card master
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "Branch or tag containing the builder script"
+        required: true
+        default: "rebuild/japanese-card-master"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Generate Japanese card master
+        run: |
+          python tools/card_master/build_japanese_master.py --output-dir build/card-master
+
+      - name: Upload generated CSV files
+        uses: actions/upload-artifact@v4
+        with:
+          name: japanese-card-master
+          path: build/card-master/*.csv
+          if-no-files-found: error
+          retention-days: 14
