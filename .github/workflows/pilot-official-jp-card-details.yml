@@ -1,0 +1,60 @@
+name: Pilot official Japanese card detail extraction
+
+on:
+  workflow_dispatch:
+    inputs:
+      discovery_run_id:
+        description: "Run ID of the successful full official ID discovery workflow"
+        required: true
+        type: string
+      max_cards:
+        description: "Pilot sample size (20-50; recommended 20)"
+        required: true
+        default: "20"
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  pilot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: python -m pip install requests beautifulsoup4
+
+      - name: Download validated official ID list
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SOURCE_RUN_ID: ${{ inputs.discovery_run_id }}
+        run: |
+          mkdir -p build/input
+          gh run download "$SOURCE_RUN_ID" --repo "$GH_REPO" --name official-jp-card-discovery --dir build/input
+
+      - name: Fetch small sequential pilot
+        run: |
+          python tools/card_master/pilot_official_jp_card_details.py \
+            --ids-csv build/input/official_card_ids.csv \
+            --max-cards "${{ inputs.max_cards }}" \
+            --delay 3.5 \
+            --output-dir build/official-jp-detail-pilot
+
+      - name: Upload pilot outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: official-jp-detail-pilot
+          path: build/official-jp-detail-pilot/
+          if-no-files-found: warn
+          retention-days: 14
